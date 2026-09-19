@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Jev Ad Blocker",
+  "version": "0.1.0",
+  "description": "Chrome 拡張の固定ルールと TypeSafe Jev の意味判定を組み合わせた広告ブロッカー。",
+  "permissions": [
+    "storage",
+    "tabs",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.typesafe.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Jev Ad Blocker",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "static_blocklist",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Jev Ad Blocker</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <div class="mark">J</div>
+        <div>
+          <h1>Jev Ad Blocker</h1>
+          <p>固定ルール + Jev の意味判定</p>
+        </div>
+      </header>
+
+      <section class="card toggle-card">
+        <div>
+          <strong>このサイトで有効</strong>
+          <small id="pageName">現在のページ</small>
+        </div>
+        <label class="switch" aria-label="広告ブロッカーを有効にする">
+          <input id="enabled" type="checkbox">
+          <span></span>
+        </label>
+      </section>
+
+      <section class="card key-card">
+        <div class="row-label">
+          <strong>TypeSafe API キー</strong>
+          <output id="keyState">未設定</output>
+        </div>
+        <input id="apiKey" class="key-input" type="password" autocomplete="off" spellcheck="false" placeholder="apikey_…">
+        <div class="key-actions">
+          <button id="saveKey" type="button">キーを保存</button>
+          <button id="clearKey" class="secondary" type="button">削除</button>
+        </div>
+        <p class="hint">保存先はこの拡張の Chrome ストレージです。入力したキーは再表示しません。</p>
+      </section>
+
+      <section class="card">
+        <div class="row-label">
+          <strong>Jev 判定のしきい値</strong>
+          <output id="thresholdValue">78%</output>
+        </div>
+        <input id="threshold" type="range" min="50" max="99" step="1" value="78">
+        <p class="hint">高いほど慎重に隠します。固定ドメインルールは常に有効です。</p>
+      </section>
+
+      <section class="status-grid">
+        <div class="status-item">
+          <span class="status-dot" id="serviceDot"></span>
+          <div><small>TypeSafe API</small><strong id="serviceStatus">確認中…</strong></div>
+        </div>
+        <div class="status-item">
+          <div><small>このページ</small><strong id="pageStats">確認中…</strong></div>
+        </div>
+      </section>
+
+      <p class="privacy">ページ全体は送信せず、候補要素の短い属性だけをローカルサービス経由で判定します。</p>
+      <p class="error" id="error" role="status"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
