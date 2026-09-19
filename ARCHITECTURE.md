@@ -1,5 +1,7 @@
 # Jev Ad Blocker の設計
 
+[English architecture notes](ARCHITECTURE.en.md)
+
 ## 目的
 
 既知の広告配信先を低遅延で止めつつ、サイトごとに異なる `sponsored` 表示や広告ウィジェットを TypeSafe Jev の構造化判定で補完する。Jev が利用できない場合にページを壊さないことを優先する。Node.js/npm には依存しない。

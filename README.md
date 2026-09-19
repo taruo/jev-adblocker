@@ -1,5 +1,7 @@
 # Jev Ad Blocker
 
+[English documentation](README.en.md)
+
 Chrome Manifest V3 の広告ブロッカーです。既知の広告・トラッキングドメインは `declarativeNetRequest` の固定ルールで止め、DOM 上で判断が必要な候補だけを TypeSafe の `jev-latest` に問い合わせます。
 
 ## 構成
