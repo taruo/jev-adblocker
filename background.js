@@ -3,7 +3,21 @@ const DEFAULT_SETTINGS = {
   enabled: true,
   threshold: 0.78,
   apiKey: "",
+  apiKeyVersion: 0,
+  enabledByOrigin: {},
 };
+let storageAccessReady = Promise.resolve();
+if (typeof chrome.storage.local.setAccessLevel === "function") {
+  try {
+    const accessResult = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+    storageAccessReady = accessResult && typeof accessResult.then === "function"
+      ? accessResult.catch(() => undefined)
+      : Promise.resolve();
+  } catch {
+    storageAccessReady = Promise.resolve();
+  }
+}
+let settingsWriteQueue = Promise.resolve();
 
 function clampThreshold(value) {
   const number = Number(value);
@@ -11,39 +25,75 @@ function clampThreshold(value) {
   return Math.min(0.99, Math.max(0.5, number));
 }
 
+function normalizeOrigin(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : "";
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeEnabledByOrigin(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([origin, enabled]) => [normalizeOrigin(origin), enabled !== false])
+      .filter(([origin]) => Boolean(origin)),
+  );
+}
+
 async function getSettings() {
+  await storageAccessReady;
   const stored = await chrome.storage.local.get(DEFAULT_SETTINGS);
   return {
     enabled: stored.enabled !== false,
     threshold: clampThreshold(stored.threshold),
     apiKey: typeof stored.apiKey === "string" ? stored.apiKey.trim() : "",
+    apiKeyVersion: Number.isInteger(stored.apiKeyVersion) ? stored.apiKeyVersion : 0,
+    enabledByOrigin: sanitizeEnabledByOrigin(stored.enabledByOrigin),
   };
 }
 
-function publicSettings(settings) {
+function enabledForOrigin(settings, origin) {
+  const normalized = normalizeOrigin(origin);
+  if (normalized && Object.prototype.hasOwnProperty.call(settings.enabledByOrigin, normalized)) {
+    return settings.enabledByOrigin[normalized] !== false;
+  }
+  return settings.enabled;
+}
+
+function publicSettings(settings, origin) {
   return {
-    enabled: settings.enabled,
+    enabled: enabledForOrigin(settings, origin),
     threshold: settings.threshold,
     hasApiKey: Boolean(settings.apiKey),
+    apiKeyVersion: settings.apiKeyVersion,
   };
 }
 
 async function updateBadge(settings) {
-  await chrome.action.setBadgeText({ text: settings.enabled ? "ON" : "OFF" });
+  const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  const activeOrigin = normalizeOrigin(activeTabs[0]?.url);
+  const enabled = enabledForOrigin(settings, activeOrigin);
+  await chrome.action.setBadgeText({ text: enabled ? "ON" : "OFF" });
   await chrome.action.setBadgeBackgroundColor({
-    color: settings.enabled ? "#0f766e" : "#64748b",
+    color: enabled ? "#0f766e" : "#64748b",
   });
 }
 
-async function broadcastSettings(settings) {
+async function broadcastSettings(settings, targetOrigin = "") {
   const tabs = await chrome.tabs.query({});
-  const message = { type: "SETTINGS_CHANGED", settings: publicSettings(settings) };
   await Promise.all(
     tabs
       .filter((tab) => tab.id && /^https?:/.test(tab.url || ""))
+      .filter((tab) => !targetOrigin || normalizeOrigin(tab.url) === targetOrigin)
       .map(async (tab) => {
         try {
-          await chrome.tabs.sendMessage(tab.id, message);
+          await chrome.tabs.sendMessage(tab.id, {
+            type: "SETTINGS_CHANGED",
+            settings: publicSettings(settings, normalizeOrigin(tab.url)),
+          });
         } catch {
           // A page without an injected content script is expected here.
         }
@@ -51,18 +101,45 @@ async function broadcastSettings(settings) {
   );
 }
 
-async function saveSettings(input) {
-  const current = await getSettings();
-  const hasNewKey = Object.prototype.hasOwnProperty.call(input || {}, "apiKey");
-  const settings = {
-    enabled: input?.enabled !== false,
-    threshold: clampThreshold(input?.threshold),
-    apiKey: hasNewKey ? String(input.apiKey || "").trim() : current.apiKey,
-  };
-  await chrome.storage.local.set(settings);
-  await updateBadge(settings);
-  await broadcastSettings(settings);
-  return publicSettings(settings);
+function saveSettings(input, origin) {
+  let keyChanged = false;
+  let thresholdChanged = false;
+  let enabledChanged = false;
+  const operation = settingsWriteQueue.then(async () => {
+    const current = await getSettings();
+    const updates = {};
+    const normalizedOrigin = normalizeOrigin(origin);
+    if (Object.prototype.hasOwnProperty.call(input || {}, "apiKey")) {
+      updates.apiKey = String(input.apiKey || "").trim();
+      updates.apiKeyVersion = current.apiKeyVersion + 1;
+      keyChanged = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(input || {}, "threshold")) {
+      updates.threshold = clampThreshold(input.threshold);
+      thresholdChanged = updates.threshold !== current.threshold;
+    }
+    if (Object.prototype.hasOwnProperty.call(input || {}, "enabled")) {
+      if (!normalizedOrigin) throw new Error("対象サイトを判定できません");
+      enabledChanged = enabledForOrigin(current, normalizedOrigin) !== (input.enabled !== false);
+      updates.enabledByOrigin = {
+        ...current.enabledByOrigin,
+        [normalizedOrigin]: input.enabled !== false,
+      };
+    }
+    if (Object.keys(updates).length === 0) return getSettings();
+    await storageAccessReady;
+    await chrome.storage.local.set(updates);
+    return getSettings();
+  });
+  settingsWriteQueue = operation.catch(() => undefined);
+  return operation.then(async (settings) => {
+    await updateBadge(settings);
+    const targetOrigin = enabledChanged && !thresholdChanged && !keyChanged
+      ? normalizeOrigin(origin)
+      : "";
+    await broadcastSettings(settings, targetOrigin);
+    return publicSettings(settings, targetOrigin || origin);
+  });
 }
 
 function text(value, maxLength) {
@@ -104,9 +181,30 @@ function makeQuestions(items) {
   );
 }
 
-async function classify(items, page) {
+function createClassifierError(message, code, retryable = false) {
+  return Object.assign(new Error(message), { code, retryable });
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function classify(items, page, sender) {
+  if (!sender?.tab) throw createClassifierError("対象ページからの要求ではありません", "sender", false);
   const settings = await getSettings();
-  if (!settings.apiKey) throw new Error("TypeSafe API キーが設定されていません");
+  const origin = normalizeOrigin(sender.tab.url) || normalizeOrigin(page?.origin);
+  if (!enabledForOrigin(settings, origin)) {
+    throw createClassifierError("このサイトのJev判定は無効です", "disabled", false);
+  }
+  if (!settings.apiKey) {
+    throw createClassifierError("TypeSafe API キーが設定されていません", "missing-key", false);
+  }
 
   const candidates = (Array.isArray(items) ? items : [])
     .slice(0, 20)
@@ -116,16 +214,14 @@ async function classify(items, page) {
   const requestBody = {
     model: "jev-latest",
     state: {
-      page: { origin: text(page?.origin, 200) },
+      page: { origin: text(origin, 200) },
       candidates,
     },
     questions: makeQuestions(candidates),
   };
-
   let response;
-  let payload;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    response = await fetch(TYPESAFE_URL, {
+  try {
+    response = await fetchWithTimeout(TYPESAFE_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${settings.apiKey}`,
@@ -134,17 +230,20 @@ async function classify(items, page) {
       body: JSON.stringify(requestBody),
       cache: "no-store",
     });
-    payload = await response.json().catch(() => ({}));
-    if (response.status !== 429 && response.status !== 529) break;
-    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  } catch (error) {
+    throw createClassifierError(
+      error.name === "AbortError" ? "TypeSafe API の応答がタイムアウトしました" : "TypeSafe API に接続できません",
+      "network",
+      true,
+    );
   }
-
+  const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 401) throw new Error("TypeSafe API キーが無効です");
+    if (response.status === 401) throw createClassifierError("TypeSafe API キーが無効です", "invalid-key", false);
     if (response.status === 429 || response.status === 529) {
-      throw new Error("TypeSafe API が混雑しています。後で再試行します");
+      throw createClassifierError("TypeSafe API が混雑しています", "rate-limit", true);
     }
-    throw new Error(`TypeSafe API エラー (HTTP ${response.status})`);
+    throw createClassifierError(`TypeSafe API エラー (HTTP ${response.status})`, "api", false);
   }
 
   const results = candidates.map((candidate, index) => {
@@ -158,9 +257,12 @@ async function classify(items, page) {
   return { model: "jev-latest", results };
 }
 
+function isExtensionUi(sender) {
+  return Boolean(sender?.id === chrome.runtime.id && !sender.tab);
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const settings = await getSettings();
-  await chrome.storage.local.set(settings);
   await updateBadge(settings);
 });
 
@@ -168,14 +270,34 @@ chrome.runtime.onStartup.addListener(async () => {
   await updateBadge(await getSettings());
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+if (chrome.tabs.onActivated?.addListener) {
+  chrome.tabs.onActivated.addListener(() => {
+    getSettings().then(updateBadge).catch(() => undefined);
+  });
+}
+
+if (chrome.tabs.onUpdated?.addListener) {
+  chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+    if (changeInfo.status === "complete") {
+      getSettings().then(updateBadge).catch(() => undefined);
+    }
+  });
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "GET_SETTINGS") {
-    getSettings().then((settings) => sendResponse({ settings: publicSettings(settings) }));
+    getSettings().then((settings) =>
+      sendResponse({ settings: publicSettings(settings, message.origin) }),
+    );
     return true;
   }
 
   if (message?.type === "SET_SETTINGS") {
-    saveSettings(message.settings)
+    if (!isExtensionUi(sender)) {
+      sendResponse({ error: "設定UIからのみ変更できます" });
+      return false;
+    }
+    saveSettings(message.settings, message.origin)
       .then((settings) => sendResponse({ settings }))
       .catch((error) => sendResponse({ error: error.message }));
     return true;
@@ -189,10 +311,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "CLASSIFY") {
-    classify(message.items, message.page)
+    classify(message.items, message.page, sender)
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) =>
-        sendResponse({ ok: false, error: error.message || "TypeSafe API unavailable" }),
+        sendResponse({
+          ok: false,
+          error: error.message || "TypeSafe API unavailable",
+          code: error.code || "unknown",
+          retryable: error.retryable === true,
+        }),
       );
     return true;
   }

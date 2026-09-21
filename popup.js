@@ -10,6 +10,7 @@ const apiKeyInput = document.querySelector("#apiKey");
 const keyState = document.querySelector("#keyState");
 const saveKeyButton = document.querySelector("#saveKey");
 const clearKeyButton = document.querySelector("#clearKey");
+let currentOrigin = "";
 
 function showError(message) {
   errorText.textContent = message || "";
@@ -28,18 +29,31 @@ async function activeTab() {
   return tabs[0];
 }
 
+function originFromTab(tab) {
+  try {
+    const url = new URL(tab?.url || "");
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : "";
+  } catch {
+    return "";
+  }
+}
+
 async function refresh() {
   showError("");
-  const settingsResponse = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
+  const tab = await activeTab();
+  currentOrigin = originFromTab(tab);
+  const settingsResponse = await chrome.runtime.sendMessage({
+    type: "GET_SETTINGS",
+    origin: currentOrigin,
+  });
   if (settingsResponse?.settings) renderSettings(settingsResponse.settings);
 
   const status = await chrome.runtime.sendMessage({ type: "GET_SERVICE_STATUS" });
   serviceDot.className = `status-dot ${status?.keyConfigured ? "online" : "offline"}`;
   serviceStatus.textContent = status?.keyConfigured ? "キー設定済み" : "キー未設定";
 
-  const tab = await activeTab();
-  pageName.textContent = tab?.url ? new URL(tab.url).hostname : "このページ";
-  if (!tab?.id || !/^https?:/.test(tab.url || "")) {
+  pageName.textContent = currentOrigin ? new URL(tab.url).hostname : "対象外のページ";
+  if (!tab?.id || !currentOrigin) {
     pageStats.textContent = "対象外";
     return;
   }
@@ -54,8 +68,13 @@ async function refresh() {
 }
 
 async function save() {
+  if (!currentOrigin) {
+    showError("このページではサイト設定を変更できません");
+    return;
+  }
   const response = await chrome.runtime.sendMessage({
     type: "SET_SETTINGS",
+    origin: currentOrigin,
     settings: {
       enabled: enabledInput.checked,
       threshold: Number(thresholdInput.value) / 100,
@@ -72,7 +91,7 @@ async function saveKey() {
   }
   const response = await chrome.runtime.sendMessage({
     type: "SET_SETTINGS",
-    settings: { apiKey, enabled: enabledInput.checked, threshold: Number(thresholdInput.value) / 100 },
+    settings: { apiKey },
   });
   if (response?.error) showError(response.error);
   else await refresh();
@@ -81,7 +100,7 @@ async function saveKey() {
 async function clearKey() {
   const response = await chrome.runtime.sendMessage({
     type: "SET_SETTINGS",
-    settings: { apiKey: "", enabled: enabledInput.checked, threshold: Number(thresholdInput.value) / 100 },
+    settings: { apiKey: "" },
   });
   if (response?.error) showError(response.error);
   else await refresh();
