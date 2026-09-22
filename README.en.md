@@ -32,6 +32,14 @@ The extension batches up to 20 candidates into one System One request and asks o
 
 This direct-from-extension configuration is intended for personal or local use. An API key stored in extension storage can be accessed by someone who can inspect or modify the same Chrome profile or extension. Do not publish a key in this repository. For Chrome Web Store distribution, move the key behind an authenticated server instead of shipping it with the extension.
 
+## Responsiveness fix (0.3.2)
+
+Fixed a MutationObserver feedback loop that could freeze Chrome when a low-scoring element was left visible. Marker writes are now idempotent, and the observer only queues work instead of reading layout or updating visibility. DOM observation stops when Jev is disabled for the site or no API key is configured. Cached decisions still respond to threshold changes while API retries are blocked.
+
+After updating the files, click **Reload** for the extension on `chrome://extensions`, then reload the affected pages as well. Existing tabs retain the old content script until the page is reloaded.
+
+The local regression suite uses real browser DOM and MutationObserver behavior, with mocked extension messages and no TypeSafe requests. With Node.js and Git available, run `node diagnostics/serve-observer-repro.cjs` and open `http://127.0.0.1:8765` in a separate browser without this extension. The historical positive-control case deliberately reaches a 200-callback safety cutoff; fixed-source cases must not. Results appear on the page and are saved to `diagnostics/observer-regression-results.jsonl` (ignored by Git). Stop the server with Ctrl+C. Node.js is only a development-test dependency, not an extension requirement.
+
 ## Project notes
 
 See [ARCHITECTURE.en.md](ARCHITECTURE.en.md) for the component boundaries, request flow, and failure behavior. The TypeSafe API contract is documented at <https://docs.typesafe.ai/api>.

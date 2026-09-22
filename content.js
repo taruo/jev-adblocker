@@ -38,12 +38,15 @@
   const MAX_PENDING_ROOTS = 64;
   const AD_HINT = /(^|[-_\s])(ad|ads|advert|advertisement|sponsor|sponsored|promoted|promo|promotion|promotional|doubleclick|taboola|outbrain|criteo)([-_\s]|$)/i;
   const stateByElement = new WeakMap();
+  let ownClassValues = new WeakMap();
   const trackedElements = new Set();
+  const scoresToReapply = new Set();
   const scanRoots = new Set();
   const candidateBacklog = new Set();
   const pendingById = new Map();
   let settings = { enabled: true, threshold: 0.78, hasApiKey: false };
   let scanTimer = null;
+  let reapplyTimer = null;
   let retryTimer = null;
   let retryBlockedUntil = 0;
   let retryAttempt = 0;
@@ -51,6 +54,8 @@
   let requestEpoch = 0;
   let nextId = 0;
   let lastScanAt = 0;
+  let lastReapplyAt = 0;
+  let observing = false;
   const stats = { checked: 0, hidden: 0, serviceErrors: 0 };
 
   function normalize(value, maxLength) {
@@ -100,12 +105,13 @@
   }
 
   function dimensions(element, record) {
+    // Our CSS marker also survives a site's className replacement.
+    if (isHidden(element) && record?.width) {
+      return { width: record.width, height: record.height };
+    }
     const rect = element.getBoundingClientRect();
     if (rect.width >= 12 && rect.height >= 12) {
       return { width: Math.round(rect.width), height: Math.round(rect.height) };
-    }
-    if (element.classList.contains("jev-adblocker-hidden") && record?.width) {
-      return { width: record.width, height: record.height };
     }
     return { width: Math.round(rect.width), height: Math.round(rect.height) };
   }
@@ -134,17 +140,32 @@
     if (!(element instanceof Element)) return false;
     if (element === document.documentElement || element === document.body) return false;
     if (element.hasAttribute("data-jev-adblocker-ignore")) return false;
-    if (element.classList.contains("jev-adblocker-hidden") && record) return true;
+    if (isHidden(element) && record) return true;
     const style = getComputedStyle(element);
     if (style.display === "none" || style.visibility === "hidden") return false;
     const rect = element.getBoundingClientRect();
     return rect.width >= 12 && rect.height >= 12;
   }
 
+  function isHidden(element) {
+    return element.classList.contains("jev-adblocker-hidden") ||
+      element.getAttribute("data-jev-adblocker-hidden") === "true";
+  }
+
+  function setMarkerClass(element, hidden) {
+    if (element.classList.contains("jev-adblocker-hidden") === hidden) return;
+    if (hidden) element.classList.add("jev-adblocker-hidden");
+    else element.classList.remove("jev-adblocker-hidden");
+    if (observing) ownClassValues.set(element, element.getAttribute("class"));
+  }
+
   function unhide(element) {
-    const wasHidden = element.classList.contains("jev-adblocker-hidden");
-    element.classList.remove("jev-adblocker-hidden");
-    element.removeAttribute("data-jev-adblocker-hidden");
+    const wasHidden = isHidden(element);
+    // Even removing an absent token can emit a class mutation. Never write a no-op.
+    setMarkerClass(element, false);
+    if (element.hasAttribute("data-jev-adblocker-hidden")) {
+      element.removeAttribute("data-jev-adblocker-hidden");
+    }
     if (wasHidden) stats.hidden = Math.max(0, stats.hidden - 1);
   }
 
@@ -158,16 +179,18 @@
       unhide(element);
       return;
     }
-    if (!element.classList.contains("jev-adblocker-hidden")) {
-      element.classList.add("jev-adblocker-hidden");
-      stats.hidden += 1;
+    const wasHidden = isHidden(element);
+    setMarkerClass(element, true);
+    if (element.getAttribute("data-jev-adblocker-hidden") !== "true") {
+      element.setAttribute("data-jev-adblocker-hidden", "true");
     }
-    element.setAttribute("data-jev-adblocker-hidden", "true");
+    if (!wasHidden) stats.hidden += 1;
   }
 
   function restoreAll() {
     for (const element of trackedElements) {
       if (!element.isConnected) {
+        if (isHidden(element)) stats.hidden = Math.max(0, stats.hidden - 1);
         trackedElements.delete(element);
         continue;
       }
@@ -179,7 +202,9 @@
   function pruneTracked() {
     for (const element of trackedElements) {
       if (element.isConnected) continue;
+      if (isHidden(element)) stats.hidden = Math.max(0, stats.hidden - 1);
       trackedElements.delete(element);
+      scoresToReapply.delete(element);
       const record = recordFor(element);
       if (record?.id) pendingById.delete(record.id);
     }
@@ -201,10 +226,11 @@
   }
 
   function addCandidatesFromRoot(root) {
+    if (!root?.isConnected || candidateBacklog.size >= MAX_PENDING_CANDIDATES) return;
     if (root?.nodeType === 1 && typeof root.matches === "function" && root.matches(CANDIDATE_SELECTORS)) {
       candidateBacklog.add(root);
     }
-    if (typeof root?.querySelectorAll !== "function") return;
+    if (candidateBacklog.size >= MAX_PENDING_CANDIDATES || typeof root?.querySelectorAll !== "function") return;
     for (const element of root.querySelectorAll(CANDIDATE_SELECTORS)) {
       if (candidateBacklog.size >= MAX_PENDING_CANDIDATES) break;
       candidateBacklog.add(element);
@@ -268,7 +294,7 @@
     if (record?.fingerprint === currentFingerprint && (record.status === "queued" || record.status === "judged")) {
       return null;
     }
-    if (record?.fingerprint !== currentFingerprint && element.classList.contains("jev-adblocker-hidden")) {
+    if (record?.fingerprint !== currentFingerprint && isHidden(element)) {
       unhide(element);
       record = recordFor(element);
     }
@@ -290,6 +316,7 @@
     if (!settings.enabled || !settings.hasApiKey) return [];
     pruneTracked();
     for (const root of scanRoots) {
+      if (candidateBacklog.size >= MAX_PENDING_CANDIDATES) break;
       scanRoots.delete(root);
       addCandidatesFromRoot(root);
     }
@@ -375,6 +402,18 @@
     }, delay);
   }
 
+  function scheduleScoreReapply() {
+    if (!settings.enabled || !settings.hasApiKey || reapplyTimer !== null || !scoresToReapply.size) return;
+    // Cached display updates must still work while an API request is pending or blocked.
+    const delay = Math.max(SCAN_DELAY_MS, lastReapplyAt + MIN_SCAN_INTERVAL_MS - Date.now());
+    reapplyTimer = window.setTimeout(() => {
+      reapplyTimer = null;
+      lastReapplyAt = Date.now();
+      reapplyCachedScores();
+      if (hasWork()) scheduleScan();
+    }, delay);
+  }
+
   async function classifyBatch(items) {
     if (!items.length || scanInFlight || !settings.enabled) return;
     scanInFlight = true;
@@ -394,6 +433,7 @@
       }
       if (!settings.enabled || batchEpoch !== requestEpoch) {
         releaseBatch(items);
+        shouldScheduleFollowUp = settings.enabled;
         return;
       }
       for (const result of response.results || []) {
@@ -408,11 +448,12 @@
         ) {
           pending.record.status = "idle";
           pending.record.id = null;
+          if (pending.element.isConnected) enqueueScanRoot(pending.element);
           continue;
         }
         pending.record.status = "judged";
         pending.record.id = null;
-        pending.record.score = Number.isFinite(Number(result.score)) ? Number(result.score) : null;
+        pending.record.score = typeof result.score === "number" && Number.isFinite(result.score) ? result.score : null;
         applyScore(pending.element, pending.record);
         stats.checked += 1;
       }
@@ -420,6 +461,11 @@
       clearRetryState();
       shouldScheduleFollowUp = true;
     } catch (error) {
+      if (!settings.enabled || batchEpoch !== requestEpoch) {
+        releaseBatch(items);
+        shouldScheduleFollowUp = settings.enabled;
+        return;
+      }
       if (typeof error?.retryable !== "boolean") {
         error = Object.assign(new Error(error?.message || "classifier unavailable"), {
           code: error?.code || "runtime",
@@ -438,14 +484,20 @@
       scheduleRetry(error);
     } finally {
       scanInFlight = false;
-      if (shouldScheduleFollowUp && (scanRoots.size || candidateBacklog.size)) scheduleScan();
+      if (shouldScheduleFollowUp && hasWork()) scheduleScan();
     }
   }
 
   function scan() {
     if (!settings.enabled || !settings.hasApiKey || scanInFlight) return;
     lastScanAt = Date.now();
-    classifyBatch(collectCandidates());
+    const items = collectCandidates();
+    if (items.length) classifyBatch(items);
+    else if (hasWork()) scheduleScan();
+  }
+
+  function hasWork() {
+    return scanRoots.size || candidateBacklog.size;
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -461,13 +513,15 @@
         discardPending();
         clearRetryState();
       }
-      if (!settings.enabled) {
+      syncObserver();
+      if (!settings.enabled || !settings.hasApiKey) {
         restoreAll();
       } else {
         for (const element of trackedElements) {
           const record = recordFor(element);
-          if (element.isConnected && record?.status === "judged") applyScore(element, record);
+          if (element.isConnected && record?.status === "judged") scoresToReapply.add(element);
         }
+        scheduleScoreReapply();
         scheduleScan();
       }
       sendResponse({ ok: true });
@@ -480,27 +534,35 @@
     return false;
   });
 
-  function reapplyCachedScores(mutations) {
+  function reapplyCachedScores() {
     if (!settings.enabled || !settings.hasApiKey) return;
-    const changedElements = new Set(
-      mutations
-        .filter((mutation) => mutation.type === "attributes" && mutation.attributeName === "class")
-        .map((mutation) => mutation.target),
-    );
-    for (const element of changedElements) {
+    for (const element of scoresToReapply) {
+      scoresToReapply.delete(element);
       const record = recordFor(element);
       if (!element.isConnected || record?.status !== "judged") continue;
       if (record.fingerprint === fingerprint(element, record)) {
         applyScore(element, record);
       } else {
         unhide(element);
+        record.status = "idle";
+        record.score = null;
+        enqueueScanRoot(element);
       }
     }
   }
 
   const observer = new MutationObserver((mutations) => {
-    if (mutations.every((mutation) => mutation.type === "attributes" && mutation.attributeName === "data-jev-adblocker-hidden")) return;
-    reapplyCachedScores(mutations);
+    if (!settings.enabled || !settings.hasApiKey) return;
+    // Only enqueue work here. DOM writes and layout reads must yield to the timer.
+    const ownClassTargets = new Set();
+    for (const mutation of mutations) {
+      if (mutation.type !== "attributes" || mutation.attributeName !== "class") continue;
+      const target = mutation.target;
+      if (!ownClassValues.has(target)) continue;
+      if (ownClassValues.get(target) === target.getAttribute("class")) ownClassTargets.add(target);
+      // Consume this batch, not future site changes back to the same class value.
+      ownClassValues.delete(target);
+    }
     let shouldScheduleScan = false;
     for (const mutation of mutations) {
       if (mutation.type === "childList") {
@@ -515,30 +577,48 @@
       }
       if (mutation.type === "attributes") {
         const target = mutation.target;
-        const isOurStableMarker =
-          mutation.attributeName === "class" &&
-          target?.getAttribute("data-jev-adblocker-hidden") === "true" &&
-          target?.classList.contains("jev-adblocker-hidden");
-        if (!isOurStableMarker) {
-          shouldScheduleScan = enqueueScanRoot(target) || shouldScheduleScan;
+        if (mutation.attributeName === "class") {
+          if (ownClassTargets.has(target)) continue;
+          if (recordFor(target)?.status === "judged") scoresToReapply.add(target);
         }
+        shouldScheduleScan = enqueueScanRoot(target) || shouldScheduleScan;
       }
     }
-    if (shouldScheduleScan || candidateBacklog.size) scheduleScan();
+    scheduleScoreReapply();
+    if (shouldScheduleScan || hasWork()) scheduleScan();
   });
-  observer.observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ["id", "class", "role", "aria-label", "data-testid", "data-ad", "data-advertisement", "data-sponsored", "href", "src"],
-  });
-  enqueueScanRoot(document.body || document.documentElement);
+
+  function syncObserver() {
+    if (settings.enabled && settings.hasApiKey) {
+      if (observing) return;
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["id", "class", "role", "aria-label", "data-testid", "data-ad", "data-advertisement", "data-sponsored", "href", "src"],
+      });
+      observing = true;
+      enqueueScanRoot(document.body || document.documentElement);
+    } else {
+      observer.disconnect();
+      observing = false;
+      if (scanTimer !== null) window.clearTimeout(scanTimer);
+      if (reapplyTimer !== null) window.clearTimeout(reapplyTimer);
+      scanTimer = null;
+      reapplyTimer = null;
+      ownClassValues = new WeakMap();
+      scanRoots.clear();
+      candidateBacklog.clear();
+      scoresToReapply.clear();
+    }
+  }
 
   chrome.runtime
     .sendMessage({ type: "GET_SETTINGS", origin: location.origin })
     .then((response) => {
       if (response?.settings) settings = response.settings;
+      syncObserver();
       if (settings.enabled) {
         const jitter = Math.floor(Math.random() * 800);
         scheduleScan(INITIAL_SCAN_DELAY_MS + jitter);

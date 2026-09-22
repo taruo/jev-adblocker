@@ -14,6 +14,15 @@ Block well-known advertising endpoints with low latency while using TypeSafe Jev
 4. The Service Worker puts the page context and candidates into one System One request and builds one independent Noul question per candidate asking whether it should be hidden as advertising on this page.
 5. If a candidate's `noul` probability reaches the configured threshold, `content.js` applies a scoped CSS class to hide that element.
 
+## DOM observation and responsiveness
+
+- Only write visibility markers when their values actually change; visible or unknown-score decisions do not remove an absent class token.
+- The observer queues changed roots and cached-score work. Layout reads, visibility writes, and candidate searches run on timers. Own-class expectations are consumed in their notification batch, never reused for future site changes.
+- Cached-score updates have a separate, rate-limited timer independent of API retries, so threshold changes and marker restoration still work during a pending request or after a 401.
+- Disabling Jev or removing the key disconnects observation, clears scan/display timers, and restores visibility. Enabling it again queues the page root to cover elements added while disabled.
+- Responses from an old settings generation, including errors, are discarded, and remaining work resumes under the new generation.
+- The candidate backlog is capped at 300 entries and tracking at 200 elements; a full backlog skips further collection. Individual `querySelectorAll()` calls on large subtrees still have no execution-time budget, so this is not a guarantee against every source of page slowdown.
+
 ## API-key handling
 
 The popup can save or delete the key. `GET_SETTINGS` and settings broadcasts never contain the key itself; they expose only `hasApiKey` and a non-secret key version. The input is cleared after a refresh and the stored key is never rendered back into the popup. `chrome.storage.local` is restricted to `TRUSTED_CONTEXTS` so content scripts cannot read it directly. Jev enablement is stored per site origin.
@@ -30,3 +39,5 @@ This is suitable for personal use, not for protecting a secret in a publicly dis
 ## Verification and updates
 
 The extension is a build-free Manifest V3 project. Load the folder through Chrome's **Load unpacked** flow. After changing files, click **Reload** on `chrome://extensions` and reload the target page.
+
+For development only, `node diagnostics/serve-observer-repro.cjs` serves the current source plus commit `31039ef` as a historical positive control. The regression suite uses native browser DOM/MutationObserver behavior and mocked extension messages, requiring no key or API requests. It covers visibility, site class rewrites, enable/disable, key removal, thresholds, and stale responses. Results are automatically saved as Git-ignored JSONL; the installed extension does not load the diagnostic code or write these logs.
