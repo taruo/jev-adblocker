@@ -20,7 +20,7 @@
     "iframe",
     "aside",
   ].join(",");
-  const AD_HINT = /(^|[-_\s])(ad|ads|advert|advertisement|sponsor|sponsored|promoted|promo|doubleclick|taboola|outbrain|criteo)([-_\s]|$)/i;
+  const AD_HINT = /(^|[-_\s])(ad|ads|advert|advertisement|sponsor|sponsored|promoted|promo|promotion|promotional|doubleclick|taboola|outbrain|criteo)([-_\s]|$)/i;
   const stateByElement = new WeakMap();
   const trackedElements = new Set();
   const pendingById = new Map();
@@ -60,7 +60,7 @@
       element.getAttribute("aria-label"),
       element.getAttribute("data-testid"),
     ]
-      .map((value) => normalize(value, 180))
+      .map((value) => normalize(value, 180).replace(/([a-z])([A-Z])/g, "$1 $2"))
       .join(" ");
     return (
       element.hasAttribute("data-ad") ||
@@ -387,8 +387,23 @@
     return false;
   });
 
+  function reapplyCachedScores(mutations) {
+    if (!settings.enabled || !settings.hasApiKey) return;
+    if (!mutations.some((mutation) => mutation.type === "attributes" && mutation.attributeName === "class")) return;
+    for (const element of trackedElements) {
+      const record = recordFor(element);
+      if (!element.isConnected || record?.status !== "judged") continue;
+      if (record.fingerprint === fingerprint(element, record)) {
+        applyScore(element, record);
+      } else {
+        unhide(element);
+      }
+    }
+  }
+
   const observer = new MutationObserver((mutations) => {
     if (mutations.every((mutation) => mutation.type === "attributes" && mutation.attributeName === "data-jev-adblocker-hidden")) return;
+    reapplyCachedScores(mutations);
     scheduleScan();
   });
   observer.observe(document.documentElement, {

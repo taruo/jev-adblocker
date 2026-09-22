@@ -1,4 +1,5 @@
-.jev-adblocker-hidden {
+.jev-adblocker-hidden,
+[data-jev-adblocker-hidden="true"] {
   display: none !important;
   visibility: hidden !important;
 }

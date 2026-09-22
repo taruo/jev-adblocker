@@ -106,5 +106,14 @@
       "urlFilter": "||zedo.com^",
       "resourceTypes": ["script", "image", "sub_frame", "xmlhttprequest", "ping"]
     }
+  },
+  {
+    "id": 13,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "urlFilter": "||html-load.com^",
+      "resourceTypes": ["script", "image", "sub_frame", "xmlhttprequest", "ping"]
+    }
   }
 ]
