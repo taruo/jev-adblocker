@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jev Ad Blocker",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minimum_chrome_version": "102",
   "description": "ページ文脈と TypeSafe Jev の意味判定を組み合わせた Chrome 広告ブロッカー。",
   "permissions": [

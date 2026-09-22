@@ -2,7 +2,9 @@
   "use strict";
 
   const BATCH_SIZE = 20;
-  const SCAN_DELAY_MS = 350;
+  const SCAN_DELAY_MS = 800;
+  const INITIAL_SCAN_DELAY_MS = 1200;
+  const MIN_SCAN_INTERVAL_MS = 1500;
   const RETRY_DELAYS_MS = [10000, 30000, 60000];
   const RETRY_COOLDOWN_MS = 60000;
   const CANDIDATE_SELECTORS = [
@@ -11,18 +13,34 @@
     "[data-sponsored]",
     "[aria-label*='advert' i]",
     "[aria-label*='sponsor' i]",
-    "[id*='ad' i]",
-    "[class*='ad' i]",
-    "[id*='sponsor' i]",
-    "[class*='sponsor' i]",
-    "[id*='promo' i]",
-    "[class*='promo' i]",
+    "[id^='ad' i]",
+    "[id*='-ad-' i]",
+    "[id*='_ad_' i]",
+    "[id^='sponsor' i]",
+    "[id*='-sponsor' i]",
+    "[id^='promo' i]",
+    "[id*='-promo' i]",
+    "[class^='ad-' i]",
+    "[class^='ad_' i]",
+    "[class~='ad']",
+    "[class~='ads']",
+    "[class*=' ad-' i]",
+    "[class*=' ad_' i]",
+    "[class^='sponsor' i]",
+    "[class*=' sponsor-' i]",
+    "[class^='promo' i]",
+    "[class*=' promo-' i]",
     "iframe",
     "aside",
   ].join(",");
+  const MAX_TRACKED_ELEMENTS = 200;
+  const MAX_PENDING_CANDIDATES = 300;
+  const MAX_PENDING_ROOTS = 64;
   const AD_HINT = /(^|[-_\s])(ad|ads|advert|advertisement|sponsor|sponsored|promoted|promo|promotion|promotional|doubleclick|taboola|outbrain|criteo)([-_\s]|$)/i;
   const stateByElement = new WeakMap();
   const trackedElements = new Set();
+  const scanRoots = new Set();
+  const candidateBacklog = new Set();
   const pendingById = new Map();
   let settings = { enabled: true, threshold: 0.78, hasApiKey: false };
   let scanTimer = null;
@@ -32,6 +50,7 @@
   let scanInFlight = false;
   let requestEpoch = 0;
   let nextId = 0;
+  let lastScanAt = 0;
   const stats = { checked: 0, hidden: 0, serviceErrors: 0 };
 
   function normalize(value, maxLength) {
@@ -166,6 +185,32 @@
     }
   }
 
+  function enqueueScanRoot(node) {
+    const root = node?.nodeType === 1 || node?.nodeType === 11
+      ? node
+      : node?.parentElement;
+    if (!root || typeof root.querySelectorAll !== "function") return false;
+    if (scanRoots.has(root)) return false;
+    for (const queuedRoot of scanRoots) {
+      if (typeof queuedRoot.contains === "function" && queuedRoot.contains(root)) return false;
+      if (typeof root.contains === "function" && root.contains(queuedRoot)) scanRoots.delete(queuedRoot);
+    }
+    if (scanRoots.size >= MAX_PENDING_ROOTS) return false;
+    scanRoots.add(root);
+    return true;
+  }
+
+  function addCandidatesFromRoot(root) {
+    if (root?.nodeType === 1 && typeof root.matches === "function" && root.matches(CANDIDATE_SELECTORS)) {
+      candidateBacklog.add(root);
+    }
+    if (typeof root?.querySelectorAll !== "function") return;
+    for (const element of root.querySelectorAll(CANDIDATE_SELECTORS)) {
+      if (candidateBacklog.size >= MAX_PENDING_CANDIDATES) break;
+      candidateBacklog.add(element);
+    }
+  }
+
   function describe(element, record, id) {
     const size = dimensions(element, record);
     return {
@@ -216,6 +261,7 @@
   }
 
   function queueCandidate(element) {
+    if (!trackedElements.has(element) && trackedElements.size >= MAX_TRACKED_ELEMENTS) return null;
     trackedElements.add(element);
     let record = recordFor(element);
     const currentFingerprint = fingerprint(element, record);
@@ -243,14 +289,19 @@
   function collectCandidates() {
     if (!settings.enabled || !settings.hasApiKey) return [];
     pruneTracked();
+    for (const root of scanRoots) {
+      scanRoots.delete(root);
+      addCandidatesFromRoot(root);
+    }
     const items = [];
-    for (const element of document.querySelectorAll(CANDIDATE_SELECTORS)) {
-      if (items.length >= BATCH_SIZE) break;
+    for (const element of candidateBacklog) {
+      candidateBacklog.delete(element);
       const record = recordFor(element);
       if (!isEligible(element, record)) continue;
       if (!hasAdHint(element) && element.tagName !== "IFRAME" && element.tagName !== "ASIDE") continue;
       const item = queueCandidate(element);
       if (item) items.push(item);
+      if (items.length >= BATCH_SIZE) break;
     }
     return items;
   }
@@ -268,6 +319,9 @@
   }
 
   function discardPending() {
+    for (const pending of pendingById.values()) {
+      if (pending.element?.isConnected) enqueueScanRoot(pending.element);
+    }
     releaseBatch([...pendingById.values()].map((pending) => ({ id: pending.record.id })));
   }
 
@@ -313,6 +367,8 @@
       }, retryBlockedUntil - Date.now());
       return;
     }
+    const rateLimitDelay = Math.max(0, lastScanAt + MIN_SCAN_INTERVAL_MS - Date.now());
+    delay = Math.max(delay, rateLimitDelay);
     scanTimer = window.setTimeout(() => {
       scanTimer = null;
       scan();
@@ -371,17 +427,24 @@
         });
       }
       stats.serviceErrors += 1;
+      if (error?.retryable) {
+        for (const item of items) {
+          const pending = pendingById.get(item.id);
+          if (pending?.element?.isConnected) enqueueScanRoot(pending.element);
+        }
+      }
       releaseBatch(items);
       if (error?.code === "disabled") return;
       scheduleRetry(error);
     } finally {
       scanInFlight = false;
-      if (shouldScheduleFollowUp) scheduleScan();
+      if (shouldScheduleFollowUp && (scanRoots.size || candidateBacklog.size)) scheduleScan();
     }
   }
 
   function scan() {
     if (!settings.enabled || !settings.hasApiKey || scanInFlight) return;
+    lastScanAt = Date.now();
     classifyBatch(collectCandidates());
   }
 
@@ -419,8 +482,12 @@
 
   function reapplyCachedScores(mutations) {
     if (!settings.enabled || !settings.hasApiKey) return;
-    if (!mutations.some((mutation) => mutation.type === "attributes" && mutation.attributeName === "class")) return;
-    for (const element of trackedElements) {
+    const changedElements = new Set(
+      mutations
+        .filter((mutation) => mutation.type === "attributes" && mutation.attributeName === "class")
+        .map((mutation) => mutation.target),
+    );
+    for (const element of changedElements) {
       const record = recordFor(element);
       if (!element.isConnected || record?.status !== "judged") continue;
       if (record.fingerprint === fingerprint(element, record)) {
@@ -434,7 +501,30 @@
   const observer = new MutationObserver((mutations) => {
     if (mutations.every((mutation) => mutation.type === "attributes" && mutation.attributeName === "data-jev-adblocker-hidden")) return;
     reapplyCachedScores(mutations);
-    scheduleScan();
+    let shouldScheduleScan = false;
+    for (const mutation of mutations) {
+      if (mutation.type === "childList") {
+        for (const node of mutation.addedNodes || []) {
+          shouldScheduleScan = enqueueScanRoot(node) || shouldScheduleScan;
+        }
+        continue;
+      }
+      if (mutation.type === "characterData") {
+        shouldScheduleScan = enqueueScanRoot(mutation.target) || shouldScheduleScan;
+        continue;
+      }
+      if (mutation.type === "attributes") {
+        const target = mutation.target;
+        const isOurStableMarker =
+          mutation.attributeName === "class" &&
+          target?.getAttribute("data-jev-adblocker-hidden") === "true" &&
+          target?.classList.contains("jev-adblocker-hidden");
+        if (!isOurStableMarker) {
+          shouldScheduleScan = enqueueScanRoot(target) || shouldScheduleScan;
+        }
+      }
+    }
+    if (shouldScheduleScan || candidateBacklog.size) scheduleScan();
   });
   observer.observe(document.documentElement, {
     childList: true,
@@ -443,12 +533,16 @@
     attributes: true,
     attributeFilter: ["id", "class", "role", "aria-label", "data-testid", "data-ad", "data-advertisement", "data-sponsored", "href", "src"],
   });
+  enqueueScanRoot(document.body || document.documentElement);
 
   chrome.runtime
     .sendMessage({ type: "GET_SETTINGS", origin: location.origin })
     .then((response) => {
       if (response?.settings) settings = response.settings;
-      if (settings.enabled) scheduleScan();
+      if (settings.enabled) {
+        const jitter = Math.floor(Math.random() * 800);
+        scheduleScan(INITIAL_SCAN_DELAY_MS + jitter);
+      }
     })
     .catch(() => undefined);
 })();

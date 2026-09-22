@@ -1,4 +1,6 @@
 const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
+const MAX_CONCURRENT_CLASSIFICATIONS = 2;
+const MAX_QUEUED_CLASSIFICATIONS = 16;
 const DEFAULT_SETTINGS = {
   enabled: true,
   threshold: 0.78,
@@ -18,6 +20,8 @@ if (typeof chrome.storage.local.setAccessLevel === "function") {
   }
 }
 let settingsWriteQueue = Promise.resolve();
+let activeClassifications = 0;
+const classificationQueue = [];
 
 function clampThreshold(value) {
   const number = Number(value);
@@ -207,6 +211,31 @@ function createClassifierError(message, code, retryable = false) {
   return Object.assign(new Error(message), { code, retryable });
 }
 
+function drainClassificationQueue() {
+  while (activeClassifications < MAX_CONCURRENT_CLASSIFICATIONS && classificationQueue.length) {
+    const entry = classificationQueue.shift();
+    activeClassifications += 1;
+    Promise.resolve()
+      .then(entry.task)
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        activeClassifications -= 1;
+        drainClassificationQueue();
+      });
+  }
+}
+
+function enqueueClassification(task) {
+  return new Promise((resolve, reject) => {
+    if (classificationQueue.length >= MAX_QUEUED_CLASSIFICATIONS) {
+      reject(createClassifierError("TypeSafe 判定が混み合っています", "busy", true));
+      return;
+    }
+    classificationQueue.push({ task, resolve, reject });
+    drainClassificationQueue();
+  });
+}
+
 async function fetchWithTimeout(url, options, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -333,7 +362,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "CLASSIFY") {
-    classify(message.items, message.page, sender)
+    enqueueClassification(() => classify(message.items, message.page, sender))
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) =>
         sendResponse({

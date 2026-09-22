@@ -9,8 +9,8 @@ Block well-known advertising endpoints with low latency while using TypeSafe Jev
 ## Runtime components
 
 1. Chrome's Declarative Net Request engine blocks known domains from `rules.json` before requests are made.
-2. `content.js` collects short text and DOM attributes for visible candidates, plus a bounded page-context summary (title, description, section, leading headings, and a short main-text excerpt), and sends at most 20 candidates at a time to `background.js`.
-3. `background.js` reads the API key from `chrome.storage.local` and calls `https://api.typesafe.ai/v1/systemone` directly from the extension Service Worker.
+2. `content.js` collects short text and DOM attributes for visible candidates, plus a bounded page-context summary (title, description, section, leading headings, and a short main-text excerpt), and sends at most 20 candidates at a time to `background.js`. It avoids broad substring scans, processes only added or changed DOM subtrees, and applies bounded debouncing and work limits.
+3. `background.js` reads the API key from `chrome.storage.local` and calls `https://api.typesafe.ai/v1/systemone` directly from the extension Service Worker. Classification requests from multiple tabs are concurrency-limited and queued with a finite bound.
 4. The Service Worker puts the page context and candidates into one System One request and builds one independent Noul question per candidate asking whether it should be hidden as advertising on this page.
 5. If a candidate's `noul` probability reaches the configured threshold, `content.js` applies a scoped CSS class to hide that element.
 

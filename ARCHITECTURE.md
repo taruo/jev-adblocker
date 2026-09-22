@@ -9,8 +9,8 @@
 ## 実行単位
 
 1. Chrome の Declarative Net Request が `rules.json` の既知ドメインをリクエスト前にブロックする。
-2. `content.js` が広告候補の短い本文・DOM属性と、ページのタイトル、説明、カテゴリ、見出し、本文冒頭の短い抜粋を集め、最大20件ずつ `background.js` に送る。
-3. `background.js` が `chrome.storage.local` から API キーを読み、TypeSafe の `https://api.typesafe.ai/v1/systemone` を直接呼び出す。
+2. `content.js` が広告候補の短い本文・DOM属性と、ページのタイトル、説明、カテゴリ、見出し、本文冒頭の短い抜粋を集め、最大20件ずつ `background.js` に送る。候補セレクタは広い部分文字列検索を避け、追加・変更されたDOMサブツリーだけを、上限付き・デバウンス付きで走査する。
+3. `background.js` が `chrome.storage.local` から API キーを読み、TypeSafe の `https://api.typesafe.ai/v1/systemone` を直接呼び出す。複数タブからの判定は同時実行数を制限し、キューが無制限に膨らまないようにする。
 4. Service Worker がページ文脈と候補配列を一つの System One リクエストへまとめ、候補ごとに「このページ上で広告として隠すべきか」という独立した Noul 質問へ分解する。
 5. `noul` の値が拡張設定のしきい値以上なら、`content.js` が要素へ限定的な CSS クラスを付けて非表示にする。
 
