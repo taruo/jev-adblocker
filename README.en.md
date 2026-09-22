@@ -20,11 +20,11 @@ The extension has no Node.js, npm, or local-server dependency. Enter the TypeSaf
 3. Open the Jev Ad Blocker toolbar popup, enter your TypeSafe API key, and click **キーを保存** (Save key).
 4. Reload the page you want to browse.
 
-The API key stays in this Chrome profile's extension storage. The extension does not send the full page: it sends a short candidate text and attributes such as the tag, classes, labels, and a URL with its query string removed directly from the extension to TypeSafe.
+The API key stays in this Chrome profile's extension storage. The extension does not send the full page: it sends short candidate text and attributes such as the tag, classes, labels, and a URL with its query string removed, plus a small page-context summary (title, description, section, leading headings, and a short excerpt from the main text) directly from the extension to TypeSafe.
 
 ## How classification works
 
-The extension batches up to 20 candidates into one System One request and asks one independent Noul question per candidate. When the returned `noul` value (the probability that the candidate is advertising) reaches the default threshold of `0.78`, the candidate is hidden. The threshold can be adjusted from 50% to 99% in the popup.
+The extension batches up to 20 candidates into one System One request and asks one independent Noul question per candidate. Each question sees the page subject, headings, and excerpt together with the candidate's attributes and text, and asks whether that candidate should be hidden as advertising on this page. When the returned `noul` value (the probability that it is an ad worth hiding in this context) reaches the default threshold of `0.78`, the candidate is hidden. The threshold can be adjusted from 50% to 99% in the popup. There are no site-specific hard-coded exclusions for native widgets such as job listings.
 
 401 and missing-key errors stop automatic retries. Network, 429, and 529 errors use bounded backoff. If the key is missing or the TypeSafe request fails, the extension leaves semantic candidates visible and continues using the deterministic domain blocklist. This fail-open behavior avoids hiding ordinary page content when the AI service is unavailable.
 

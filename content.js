@@ -185,6 +185,36 @@
     };
   }
 
+  function metaContent(selector, maxLength) {
+    const meta = document.querySelector(selector);
+    return normalize(meta?.getAttribute("content"), maxLength);
+  }
+
+  function describePage() {
+    const main = document.querySelector("article, [role='main'], main") || document.body;
+    const headings = [...document.querySelectorAll("h1, h2, h3")]
+      .slice(0, 8)
+      .map((heading) => normalize(heading.textContent, 140))
+      .filter(Boolean);
+    const paragraphs = main
+      ? [...main.querySelectorAll("p")]
+          .slice(0, 12)
+          .map((paragraph) => normalize(paragraph.textContent, 240))
+          .filter(Boolean)
+      : [];
+    const mainText = normalize(
+      paragraphs.join(" ") || main?.textContent,
+      1600,
+    );
+    return {
+      title: normalize(document.title, 180),
+      description: metaContent("meta[name='description']", 320),
+      section: metaContent("meta[property='article:section'], meta[name='section']", 120),
+      headings,
+      main_text: mainText,
+    };
+  }
+
   function queueCandidate(element) {
     trackedElements.add(element);
     let record = recordFor(element);
@@ -297,7 +327,7 @@
     try {
       const response = await chrome.runtime.sendMessage({
         type: "CLASSIFY",
-        page: { origin: location.origin },
+        page: { origin: location.origin, ...describePage() },
         items,
       });
       if (!response?.ok) {

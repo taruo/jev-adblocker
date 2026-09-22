@@ -4,14 +4,14 @@
 
 ## Goal
 
-Block well-known advertising endpoints with low latency while using TypeSafe Jev to interpret site-specific `sponsored` labels and ad widgets. If Jev is unavailable, the extension should keep the page usable and fall back to deterministic rules.
+Block well-known advertising endpoints with low latency while using TypeSafe Jev to interpret site-specific `sponsored` labels and ad widgets in the context of the current page. The decision is whether a candidate should be hidden as advertising on this page, not whether a hard-coded site ID matches. If Jev is unavailable, the extension should keep the page usable and fall back to deterministic rules.
 
 ## Runtime components
 
 1. Chrome's Declarative Net Request engine blocks known domains from `rules.json` before requests are made.
-2. `content.js` collects only short text and DOM attributes for visible candidates and sends at most 20 candidates at a time to `background.js`.
+2. `content.js` collects short text and DOM attributes for visible candidates, plus a bounded page-context summary (title, description, section, leading headings, and a short main-text excerpt), and sends at most 20 candidates at a time to `background.js`.
 3. `background.js` reads the API key from `chrome.storage.local` and calls `https://api.typesafe.ai/v1/systemone` directly from the extension Service Worker.
-4. The Service Worker builds one independent Noul question per candidate in a single System One request.
+4. The Service Worker puts the page context and candidates into one System One request and builds one independent Noul question per candidate asking whether it should be hidden as advertising on this page.
 5. If a candidate's `noul` probability reaches the configured threshold, `content.js` applies a scoped CSS class to hide that element.
 
 ## API-key handling
@@ -22,7 +22,7 @@ This is suitable for personal use, not for protecting a secret in a publicly dis
 
 ## Privacy and failure behavior
 
-- The full page is never sent. Short candidate text and attributes are sent directly from the extension to TypeSafe, and URL query strings and fragments are removed.
+- The full page is never sent. Short candidate text and attributes plus a bounded page-context summary are sent directly from the extension to TypeSafe, and URL query strings and fragments are removed.
 - Network, 429, and 529 responses use bounded backoff. Missing-key and 401 responses stop automatic retries.
 - Missing keys, 401 responses, and network failures leave semantic candidates visible.
 - Static domain rules continue to work regardless of the AI request outcome.
